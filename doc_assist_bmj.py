@@ -47,7 +47,7 @@ SYSTEM_PROMPT = """
 - Specialist referral
 - Laboratory tests
 
-### Safety Protocols:
+### Safety Protocols (AI Explainability):
 - Never hallucinate missing data.
 - Use SNOMED-CT terms where applicable.
 - For ambiguous findings, state "Inconclusive – clinical correlation advised."
@@ -119,8 +119,8 @@ def process_uploaded_file(file_):
             return [image_to_base64(img) for img in images]
         elif file_.type.startswith("image"):
             return [image_to_base64(Image.open(file_))]
-    except Exception as e:
-        st.error(f"Error processing {file_.name}: {str(e)}")
+    except Exception as error:
+        st.error(f"Error processing {file_.name}: {str(error)}")
     return []
 
 
@@ -132,7 +132,7 @@ def stream_analysis(messages_):
     response_ = openai.chat.completions.create(
         model="o4-mini",
         messages=messages_,
-        max_completion_tokens=10240,
+        max_completion_tokens=12000,
         reasoning_effort="high",
         stream=True
     )
@@ -161,18 +161,6 @@ def build_messages(prompt_=None):
     if content:
         messages_.append({"role": "user", "content": content})
 
-    # Add chat history
-    for msg_ in st.session_state.chat_history:
-        messages_.append({"role": msg_["role"], "content": msg_["content"]})
-
-    # Add relevant context for follow-ups
-    if prompt_ and st.session_state.processed_data["analysis_context"]:
-        context = get_relevant_context(prompt_, st.session_state.processed_data["analysis_context"])
-        if context:
-            messages_.insert(1, {
-                "role": "system",
-                "content": f"Relevant Medical Context:\n{context}"
-            })
 
     return messages_
 
@@ -212,81 +200,41 @@ if st.button("Analyze Documents", type="primary"):
                 "images": [],
                 "analysis_context": ""
             }
-
             for file in uploaded_files:
                 st.session_state.processed_data["images"].extend(process_uploaded_file(file))
-
-            # Initial analysis with streaming
             messages = build_messages()
-            analysis_content = []
-            container = st.empty()
-
-            for chunk in stream_analysis(messages):
-                analysis_content.append(chunk)
-                if time.time() % 0.3 < 0.1:  # Update every 300ms
-                    container.markdown("".join(analysis_content))
-
-            final_analysis = "".join(analysis_content)
-            container.markdown(final_analysis)
-
-            st.session_state.chat_history.append({
-                "role": "assistant",
-                "content": final_analysis
-            })
-
-            # Store analysis context
-            st.session_state.processed_data["analysis_context"] = (
-                f"Patient History: {patient_history}\n"
-                f"Initial Analysis: {final_analysis}"
-            )
-
-            status.update(label="Analysis completed.", state="complete")
-
+            status.update(label="Processing completed.", state="complete")
         except Exception as e:
             status.update(label="Processing failed", state="error")
             st.error(f"Error: {str(e)}")
 
-# Chat Interface
-if st.session_state.chat_history:
     st.divider()
-    st.subheader("Agent Analysis")
+    st.subheader("Agent Analysis:")
+    container = st.empty()
 
-    # Display existing chat history
-    for msg in st.session_state.chat_history:
-        avatar = "🤖" if msg["role"] == "assistant" else "🩺"
-        with st.chat_message(msg["role"], avatar=avatar):
-            st.markdown(msg["content"])
+    # Initialize analysis content
+    analysis_content = []
 
-    # Handle new user input
-    if prompt := st.chat_input("Chat with DocAssist..."):
-        # Immediately show user question
-        with st.chat_message("user", avatar="🩺"):
-            st.markdown(prompt)
+    try:
+        # Show spinner until first chunk arrives
+        with st.spinner("Starting analysis..."):
+            stream = stream_analysis(messages)
+            first_chunk = next(stream)
+            analysis_content.append(first_chunk)
+    except StopIteration:
+        container.write("No analysis generated.")
+        st.stop()
+    except Exception as e:
+        container.error(f"Analysis failed: {str(e)}")
+        st.stop()
 
-        # Process assistant response
-        with st.chat_message("assistant", avatar="🤖"):
-            response = []
-            container = st.empty()
-            messages = build_messages(prompt)
+    # Display first chunk and continue streaming
+    container.markdown(first_chunk)
 
-            for chunk in stream_analysis(messages):
-                response.append(chunk)
-                if time.time() % 0.3 < 0.1:
-                    container.markdown("".join(response))
+    for chunk in stream:
+        analysis_content.append(chunk)
+        container.markdown("".join(analysis_content))
 
-            final_response = "".join(response)
-            # container.markdown(final_response)
-
-        # Update session state after streaming completes
-        st.session_state.chat_history.extend([
-            {"role": "user", "content": prompt},
-            {"role": "assistant", "content": final_response}
-        ])
-
-        # Update analysis context
-        st.session_state.processed_data["analysis_context"] += (
-            f"\nFollow-up Q: {prompt}\nA: {final_response}"
-        )
 
 # Safety Footer
 st.markdown("---")
