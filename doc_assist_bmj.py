@@ -132,7 +132,7 @@ def stream_analysis(messages_):
     response_ = openai.chat.completions.create(
         model="o4-mini",
         messages=messages_,
-        max_completion_tokens=4000,
+        max_completion_tokens=10240,
         reasoning_effort="high",
         stream=True
     )

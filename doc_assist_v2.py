@@ -24,6 +24,7 @@ SYSTEM_PROMPT = """
 6. Preventive Medicine: Suggest relevant screenings/vaccinations based on profile
 
 **Output Structure**:
+```markdown
 ### Clinical Context
 - Patient Summary: [Age/Sex/Comorbidities/Allergies]
 - Presentation Timeline: [Symptom onset → Current status]
