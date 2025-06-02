@@ -30,7 +30,6 @@ SYSTEM_PROMPT = """
 - Diagnostic Question: [Explicit clinical inquiry]
 
 ### Multi-modal Integration
-```imaging
 [Anatomical Region]: 
 - Primary Findings: [Pathology description w/ spatial orientation]
 - Key Metrics: [Quantitative measurements w/ normal ranges]
