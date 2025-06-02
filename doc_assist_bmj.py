@@ -119,8 +119,8 @@ def process_uploaded_file(file_):
             return [image_to_base64(img) for img in images]
         elif file_.type.startswith("image"):
             return [image_to_base64(Image.open(file_))]
-    except Exception as error:
-        st.error(f"Error processing {file_.name}: {str(error)}")
+    except Exception as e:
+        st.error(f"Error processing {file_.name}: {str(e)}")
     return []
 
 
@@ -308,5 +308,3 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
-
-
