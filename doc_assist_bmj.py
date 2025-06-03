@@ -1,258 +1,228 @@
-import base64
-import time
-from io import BytesIO
-
-import numpy as np
-import openai
 import streamlit as st
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_openai import ChatOpenAI
+from langchain.chains import ConversationalRetrievalChain
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.memory import ConversationBufferMemory
 from PIL import Image
+import pytesseract
+import os
+import tempfile
 from dotenv import load_dotenv
-from pdf2image import convert_from_bytes
+import re
+
 
 load_dotenv()
 
+llm = ChatOpenAI(
+    model="gpt-4-turbo",
+    temperature=0.2
+)
 
-SYSTEM_PROMPT = """
-**Role**: Expert Medical Analysis Agent combining visual data interpretation with clinical reasoning.
-
-**Capabilities**:
-1. Multi-modal Analysis: Interpret both text reports and medical images (scans, charts, diagrams, reports)
-2. Contextual Correlation: Cross-reference patient history with imaging findings
-3. Critical Finding Prioritization: Highlight urgent abnormalities using ACR appropriateness criteria
-4. Differential Diagnosis: Suggest possible diagnoses with confidence levels
-5. Evidence-based Recommendations: Propose next steps using clinical guidelines
-
-**Output Structure**:
-```markdown
-### Clinical Context
-- Patient demographics & history synthesis
-- Examination rationale
-
-### Multi-modal Findings
-- Image observations with anatomical localization
-- Text report key metrics
-- Discordance detection between modalities
-
-### Priority Classification
-- Emergent (Requires immediate action)
-- Urgent (Within 24hrs)
-- Routine
-
-### Differential Diagnosis
-| Condition | Confidence | Supporting Features | Contradicting Features |
-|-----------|------------|----------------------|-------------------------|
-
-### Action Plan
-- Imaging follow-up
-- Specialist referral
-- Laboratory tests
-
-### Safety Protocols (AI Explainability):
-- Never hallucinate missing data.
-- Use SNOMED-CT terms where applicable.
-- For ambiguous findings, state "Inconclusive – clinical correlation advised."
-- Flag inconsistencies between reports and images
-- Identify missing critical views/sections
-- Note limitations of AI interpretation
-"""
-
+st.set_page_config(page_title="Doctor's Assistant", layout="wide")
+st.title("🏥 Doc Assist: Chat with Your Documents")
 
 # Initialize session state
+if "vector_store" not in st.session_state:
+    st.session_state.vector_store = None
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-if "processed_data" not in st.session_state:
-    st.session_state.processed_data = {"text": "", "images": [], "analysis_context": ""}
-
-
-# --------------------------
-# Context Relevance Functions
-# --------------------------
-
-def get_embedding(text, model="text-embedding-3-small"):
-    text = text.replace("\n", " ")
-    return openai.embeddings.create(input=[text], model=model).data[0].embedding
-
-
-def cosine_similarity(a, b):
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-
-def split_document(text, chunk_size=1024):
-    return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-
-
-def get_relevant_context(question, context_text):
-    """Retrieve most relevant context from analysis history"""
-    if not context_text:
-        return ""
-
-    chunks = split_document(context_text)
-    question_emb = get_embedding(question)
-
-    chunk_scores = []
-    for _chunk in chunks:
-        chunk_emb = get_embedding(_chunk)
-        chunk_scores.append(cosine_similarity(question_emb, chunk_emb))
-
-    top_indices = np.argsort(chunk_scores)[-3:][::-1]
-    return "\n".join([chunks[i] for i in top_indices])
-
-
-# --------------------------
-# Core Processing Functions
-# --------------------------
-
-def pdf_to_images(pdf_bytes, dpi=300):
-    return convert_from_bytes(pdf_bytes, dpi=dpi, fmt="jpeg")
-
-
-def image_to_base64(image):
-    buffered = BytesIO()
-    image.save(buffered, format="JPEG", quality=95)
-    return base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-
-def process_uploaded_file(file_):
-    try:
-        if file_.type == "application/pdf":
-            images = pdf_to_images(file_.getvalue())
-            return [image_to_base64(img) for img in images]
-        elif file_.type.startswith("image"):
-            return [image_to_base64(Image.open(file_))]
-    except Exception as error:
-        st.error(f"Error processing {file_.name}: {str(error)}")
-    return []
-
-
-# --------------------------
-# AI Analysis Functions
-# --------------------------
-
-def stream_analysis(messages_):
-    response_ = openai.chat.completions.create(
-        model="o4-mini",
-        messages=messages_,
-        max_completion_tokens=12000,
-        reasoning_effort="high",
-        stream=True
+if "memory" not in st.session_state:
+    st.session_state.memory = ConversationBufferMemory(
+        memory_key="chat_history",
+        return_messages=True,
+        output_key='answer'
     )
-    for chunk_ in response_:
-        if content := chunk_.choices[0].delta.content:
-            yield content
+if "processed_files" not in st.session_state:
+    st.session_state.processed_files = set()
 
 
-def build_messages(prompt_=None):
-    messages_ = [{"role": "system", "content": SYSTEM_PROMPT}]
+# Function to process and embed documents
+def process_documents(files):
+    documents = []
+    for file in files:
+        # Skip already processed files
+        if file.name in st.session_state.processed_files:
+            continue
 
-    # Add initial context
-    content = []
-    if st.session_state.processed_data["text"]:
-        content.append({
-            "type": "text",
-            "text": f"Patient History:\n{st.session_state.processed_data['text']}"
-        })
+        if file.type == "application/pdf":
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                tmp_file.write(file.read())
+                tmp_file_path = tmp_file.name
+            loader = PyPDFLoader(tmp_file_path)
+            docs = loader.load()
+            for doc in docs:
+                doc.metadata["source"] = file.name
+            documents.extend(docs)
+            os.remove(tmp_file_path)
+        elif file.type in ["image/png", "image/jpeg"]:
+            image = Image.open(file)
+            text = pytesseract.image_to_string(image)
+            documents.append({
+                "page_content": text,
+                "metadata": {"source": file.name}
+            })
 
-    for img in st.session_state.processed_data["images"]:
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{img}"}
-        })
+        # Add to processed files
+        st.session_state.processed_files.add(file.name)
 
-    if content:
-        messages_.append({"role": "user", "content": content})
+    if not documents:
+        return None
 
-
-    return messages_
-
-
-# --------------------------
-# Streamlit UI Components
-# --------------------------
-
-st.title("DocAssist 🩺 - Analysis Assistant")
-
-# Document Upload Section
-with st.expander("Upload Patient Records", expanded=True):
-    patient_history = st.text_area(
-        "Patient History & Clinical Context",
-        height=150,
-        help="Enter relevant patient information, symptoms, or medical history"
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1024,
+        chunk_overlap=256,
+        separators=["\n\n", "\n", ".","?", "!", " ", ""]
     )
 
+    if all(isinstance(doc, dict) for doc in documents):
+        texts = [doc["page_content"] for doc in documents]
+        metadatas = [doc["metadata"] for doc in documents]
+        split_docs = text_splitter.create_documents(texts, metadatas=metadatas)
+    else:
+        split_docs = text_splitter.split_documents(documents)
+
+    embeddings = OpenAIEmbeddings()
+    vector_store = FAISS.from_documents(split_docs, embeddings)
+    return vector_store
+
+
+# File uploader in sidebar
+with st.sidebar:
+    st.subheader("Document Management")
     uploaded_files = st.file_uploader(
-        "Upload Medical Documents",
-        type=["pdf", "png", "jpg", "jpeg"],
-        accept_multiple_files=True,
-        help="Supported formats: PDF, PNG, JPEG"
+        "Upload reference documents (PDF, PNG, JPEG)",
+        type=["pdf", "png", "jpeg"],
+        accept_multiple_files=True
     )
 
-# Analysis Button
-if st.button("Analyze Documents", type="primary"):
-    if not uploaded_files:
-        st.warning("Please upload medical documents")
-        st.stop()
+    if st.button("Process Documents"):
+        if uploaded_files:
+            with st.spinner("Processing documents..."):
+                # Reset vector store when processing new documents
+                new_vector_store = process_documents(uploaded_files)
+                if new_vector_store:
+                    st.session_state.vector_store = new_vector_store
+                    st.success("Documents processed successfully!")
+                    # Reset chat history when new documents are processed
+                    st.session_state.chat_history = []
+                    st.session_state.memory.clear()
+                else:
+                    st.warning("No new documents to process")
+        else:
+            st.warning("Please upload documents first")
 
-    with st.status("Processing documents...", expanded=True) as status:
-        try:
-            # Process files
-            st.session_state.processed_data = {
-                "text": patient_history,
-                "images": [],
-                "analysis_context": ""
-            }
-            for file in uploaded_files:
-                st.session_state.processed_data["images"].extend(process_uploaded_file(file))
-            messages = build_messages()
-            status.update(label="Processing completed.", state="complete")
-        except Exception as e:
-            status.update(label="Processing failed", state="error")
-            st.error(f"Error: {str(e)}")
+    if st.button("Clear Chat History"):
+        st.session_state.chat_history = []
+        st.session_state.memory.clear()
+        st.rerun()
 
+# Display chat history in main area
+for message in st.session_state.chat_history:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+        if message["role"] == "assistant" and message.get("sources"):
+            st.caption(f"Sources: {message['sources']}")
+
+
+# Query processing with context enhancement
+def expand_query(query, chat_history):
+    if not chat_history:
+        return query
+
+    history_str = "\n".join(
+        [f"{msg['role']}: {msg['content']}"
+         for msg in st.session_state.chat_history[-4:]]
+    )
+
+    prompt = f"""
+    Given the conversation history and the current query, expand the query to 
+    include relevant context for document retrieval. Focus on medical terms, 
+    acronyms, and contextual relationships.
+
+    History:
+    {history_str}
+
+    Current Query: {query}
+
+    Expanded Query:
+    """
+
+    expanded = llm.invoke(prompt).content
+    return expanded.strip()
+
+
+# Chat interface
+if st.session_state.vector_store:
+    query = st.chat_input("Ask about your documents:")
+
+    if query:
+        # Add user message to chat history
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": query,
+            "sources": ""
+        })
+
+        # Display user message immediately
+        with st.chat_message("user"):
+            st.markdown(query)
+
+        # Expand query using chat history
+        with st.spinner("Analyzing context..."):
+            expanded_query = expand_query(query, st.session_state.chat_history)
+
+        # Create conversation chain
+        qa_chain = ConversationalRetrievalChain.from_llm(
+            llm=llm,
+            retriever=st.session_state.vector_store.as_retriever(
+                search_type="mmr",
+                search_kwargs={"k": 5, "fetch_k": 15}
+            ),
+            memory=st.session_state.memory,
+            return_source_documents=True
+        )
+
+        # Process query
+        with st.spinner("Searching documents..."):
+            result = qa_chain({"question": expanded_query})
+
+        # Extract sources
+        sources = set()
+        for doc in result.get("source_documents", []):
+            if hasattr(doc, 'metadata') and "source" in doc.metadata:
+                source = doc.metadata["source"]
+                # Clean up temporary file paths
+                if "tmp" in source:
+                    source = re.search(r'_(.*?\.pdf)', source).group(1) if re.search(r'_(.*?\.pdf)',
+                                                                                     source) else "Uploaded file"
+                sources.add(source)
+
+        source_str = ", ".join(sources) if sources else "General knowledge"
+        answer = result.get("answer", "I couldn't find an answer in the documents.")
+
+        # Add assistant response to history
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "content": answer,
+            "sources": source_str
+        })
+
+        # Display assistant response
+        with st.chat_message("assistant"):
+            st.markdown(answer)
+            if source_str != "General knowledge":
+                st.caption(f"Sources: {source_str}")
+
+# Sidebar status
+with st.sidebar:
     st.divider()
-    st.subheader("Agent Analysis:")
-    container = st.empty()
+    st.subheader("Current Status")
 
-    # Initialize analysis content
-    analysis_content = []
-
-    try:
-        # Show spinner until first chunk arrives
-        with st.spinner("Starting analysis..."):
-            stream = stream_analysis(messages)
-            first_chunk = next(stream)
-            analysis_content.append(first_chunk)
-    except StopIteration:
-        container.write("No analysis generated.")
-        st.stop()
-    except Exception as e:
-        container.error(f"Analysis failed: {str(e)}")
-        st.stop()
-
-    # Display first chunk and continue streaming
-    container.markdown(first_chunk)
-
-    for chunk in stream:
-        analysis_content.append(chunk)
-        container.markdown("".join(analysis_content))
-
-
-# Safety Footer
-st.markdown("---")
-st.error("""
-**Clinical Safety Notice**  
-- This AI analysis requires verification by a qualified medical professional.  
-- Never use for emergency medical decisions.
-""")
-
-st.markdown("""
-<style>
-@keyframes blink {
-    0% {opacity: 1;}
-    50% {opacity: 0;}
-    100% {opacity: 1;}
-}
-.blink {
-    animation: blink 1s step-end infinite;
-}
-</style>
-""", unsafe_allow_html=True)
+    if st.session_state.vector_store:
+        st.success("Vector store ready")
+        st.write(f"Processed documents: {len(st.session_state.processed_files)}")
+    else:
+        st.warning("No documents processed")

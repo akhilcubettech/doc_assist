@@ -1,7 +1,7 @@
 import base64
 import time
 from io import BytesIO
-
+import bcrypt
 import numpy as np
 import openai
 import streamlit as st
@@ -10,6 +10,67 @@ from dotenv import load_dotenv
 from pdf2image import convert_from_bytes
 
 load_dotenv()
+
+
+st.set_page_config(
+    page_title="DocAssist - Medical Analysis",
+    page_icon="🩺",
+    initial_sidebar_state="collapsed"  # Start with sidebar collapsed
+)
+
+# Initialize authentication state
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+    st.session_state.auth_failed = False
+    st.session_state.username = ""
+
+# Create a separate login page if not authenticated
+if not st.session_state.authenticated:
+    st.title("Medical Analysis Portal 🔒")
+
+    # Use form to prevent immediate validation
+    with st.form("login_form"):
+        username = st.text_input("Username", key="username_input")
+        password = st.text_input("Password", type="password", key="password_input")
+        submit_button = st.form_submit_button("Login", type="primary")
+
+        if submit_button:
+            try:
+                # Check if secrets are loaded
+                if "passwords" not in st.secrets:
+                    st.error("Authentication system not configured")
+                    st.session_state.auth_failed = True
+                else:
+                    # Check credentials
+                    if username in st.secrets["passwords"]:
+                        hashed_password = st.secrets.passwords[username]
+                        if bcrypt.checkpw(password.encode(), hashed_password.encode()):
+                            st.session_state.authenticated = True
+                            st.session_state.auth_failed = False
+                            st.session_state.username = username
+                            st.rerun()
+                        else:
+                            st.session_state.auth_failed = True
+                    else:
+                        st.session_state.auth_failed = True
+            except Exception as e:
+                st.error(f"Authentication error: {str(e)}")
+                st.session_state.auth_failed = True
+
+        if st.session_state.auth_failed:
+            st.error("Invalid username or password")
+
+    # Stop execution if not authenticated
+    st.stop()
+
+# If authenticated, show the main application
+with st.sidebar:
+    st.write(f"Logged in as: **{st.session_state.username}**")
+    if st.button("Logout"):
+        st.session_state.authenticated = False
+        st.session_state.auth_failed = False
+        st.session_state.username = ""
+        st.rerun()
 
 
 SYSTEM_PROMPT = """
