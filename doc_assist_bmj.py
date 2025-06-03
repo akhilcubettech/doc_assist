@@ -18,7 +18,8 @@ load_dotenv()
 
 llm = ChatOpenAI(
     model="gpt-4.1-mini",
-    temperature=0.2
+    temperature=0.2,
+    max_tokens=512
 )
 
 st.set_page_config(page_title="Doctor's Assistant", layout="wide")
